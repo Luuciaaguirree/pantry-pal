@@ -9,6 +9,7 @@ import Scanner from "./pages/Scanner.tsx";
 import Recipes from "./pages/Recipes.tsx";
 import History from "./pages/History.tsx";
 import Savings from "./pages/Savings.tsx";
+import Prime from "./pages/Prime";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -26,6 +27,7 @@ const App = () => (
             <Route path="/recipes" element={<Recipes />} />
             <Route path="/history" element={<History />} />
             <Route path="/savings" element={<Savings />} />
+            <Route path="/prime" element={<Prime />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
           <BottomNav />

@@ -1,4 +1,4 @@
-import { Home, ScanLine, ChefHat, Receipt, PiggyBank } from "lucide-react";
+import { Home, ScanLine, ChefHat, Receipt, PiggyBank, Star } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
@@ -7,6 +7,7 @@ const tabs = [
   { path: "/scanner", icon: ScanLine, label: "Escáner" },
   { path: "/recipes", icon: ChefHat, label: "Recetas" },
   { path: "/history", icon: Receipt, label: "Historial" },
+  { path: "/prime", icon: Star, label: "Prime" },
   { path: "/savings", icon: PiggyBank, label: "Ahorro" },
 ];
 
