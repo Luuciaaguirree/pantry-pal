@@ -131,12 +131,12 @@ const Scanner = () => {
               onClick={() => fileInputRef.current?.click()}
             >
               <Upload className="h-5 w-5" />
-              Subir imagen del ticket
+              Subir imagen o PDF del ticket
             </Button>
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,application/pdf"
               className="hidden"
               onChange={handleFileUpload}
             />

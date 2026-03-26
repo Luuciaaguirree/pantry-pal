@@ -1,6 +1,5 @@
 import { Offer } from "@/lib/offers";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 
 interface OfferCardProps {
   offer: Offer;
@@ -26,7 +25,7 @@ export function OfferCard({ offer }: OfferCardProps) {
             <div className="text-xs text-muted-foreground line-through">€{offer.oldPrice.toFixed(2)}</div>
           ) : null}
         </div>
-        <Button size="sm">Ver oferta</Button>
+        {/* Removed 'Ver oferta' button because offers are informational for now */}
       </div>
     </div>
   );
