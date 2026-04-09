@@ -194,6 +194,7 @@ const Scanner = () => {
   const [scannedItems, setScannedItems] = useState<
     Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }>
   >([]);
+  const [rawTexts, setRawTexts] = useState<Array<{ fileName: string; text: string }>>([]);
   const [storeName, setStoreName] = useState("Mercadona");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { addProducts } = useInventory();
@@ -218,6 +219,7 @@ const Scanner = () => {
         setStep('processing');
         try {
           let aggregated: Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }> = [];
+          const perFileTexts: Array<{ fileName: string; text: string }> = [];
           for (const file of files) {
             let text = "";
             if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
@@ -228,10 +230,13 @@ const Scanner = () => {
               // unknown type — skip
               continue;
             }
+            perFileTexts.push({ fileName: file.name, text });
             const items = parseTextToItems(text);
             aggregated = aggregated.concat(items);
           }
 
+          // store raw texts for UI panel
+          setRawTexts(perFileTexts);
           // reset progress
           setOcrProgress(null);
 
@@ -378,6 +383,21 @@ const Scanner = () => {
                 className="h-8 text-sm"
               />
             </div>
+
+            {/* Raw OCR text panel per uploaded file */}
+            {rawTexts.length > 0 && (
+              <div className="rounded-lg border bg-muted p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <strong className="text-sm">Texto extraído (raw)</strong>
+                </div>
+                {rawTexts.map((r, idx) => (
+                  <div key={idx} className="text-xs">
+                    <div className="font-medium">{r.fileName}</div>
+                    <pre className="whitespace-pre-wrap break-words text-[12px] bg-card p-2 rounded mt-1">{r.text}</pre>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <div className="space-y-2">
               {scannedItems.map((item, i) => (
