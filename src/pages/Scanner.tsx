@@ -123,50 +123,55 @@ function parseTextToItems(text: string) {
   const priceRe = /(?:€|EUR)?\s*([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2}))\b/;
   const ignoreRe = /TOTAL|SUBTOTAL|IVA|TICKET|CAMBIO|EFECTIVO|VUELTO|IMPORTE|A PAGAR/i;
 
-  for (const line of lines) {
+  for (const origLine of lines) {
+    let line = origLine;
     if (ignoreRe.test(line)) continue; // skip totals and non-product lines
 
-    const priceMatch = line.match(priceRe);
-    if (!priceMatch) continue;
-    let priceRaw = priceMatch[1];
-    // normalize thousands separators: if contains '.' and ',', guess which is decimal
+    // remove trailing single-letter markers (A/B) or column markers
+    line = line.replace(/\s+[A-Z]$/i, "");
+
+    // find all price occurrences in the line
+    const matches = Array.from(line.matchAll(priceRe));
+    if (matches.length === 0) continue;
+
+    // choose the last price as the item total (often right-most column)
+    let priceRaw = matches[matches.length - 1][1];
     if (priceRaw.indexOf(',') > -1 && priceRaw.indexOf('.') > -1) {
-      // assume '.' thousands and ',' decimal -> remove dots, replace comma
       priceRaw = priceRaw.replace(/\./g, '').replace(',', '.');
     } else {
-      // replace comma with dot
       priceRaw = priceRaw.replace(',', '.');
     }
     const price = parseFloat(priceRaw) || 0;
 
-    // name is part before price occurrence
-    const before = line.slice(0, line.indexOf(priceMatch[0])).trim();
-    // try to extract quantity and possible unit inside the before segment
+    // remove all price tokens from line for easier name/qty extraction
+    line = line.replace(new RegExp(matches.map((m) => escapeRegExp(m[0])).join('|'), 'g'), ' ');
+
+    // try to extract quantity and unit appearing near the middle (e.g., '1 ud')
     let quantity = 1;
     let unit = 'ud';
-    const qtyMatch = before.match(/^(\d+[.,]?\d*)\s*(kg|g|l|ml|uds|unid|unidad|pack)?\s*/i);
-    let name = before;
+    const qtyRe = /(\d+[.,]?\d*)\s*(kg|g|l|ml|uds?|unid|unidad|pack|x\d+g)?/i;
+    const qtyMatch = line.match(qtyRe);
     if (qtyMatch) {
       quantity = Number(qtyMatch[1].toString().replace(',', '.')) || 1;
       if (qtyMatch[2]) unit = qtyMatch[2];
-      name = before.slice(qtyMatch[0].length).trim();
+      // remove the qty token from the name
+      line = line.replace(qtyMatch[0], ' ');
     }
 
-    // fallback: try to parse patterns like 'name qty price'
-    if (!name) {
-      const parts = line.split(/\s+/);
-      if (parts.length >= 3) {
-        name = parts.slice(0, parts.length - 2).join(' ');
-      } else {
-        name = line;
-      }
-    }
+    // name is remaining text (remove excessive spaces and common labels)
+    let name = line.replace(/DESCRIPCION|DESCRIPCIÓN|CANTIDAD|PRECIO|TOTAL/gi, '').trim();
+    if (!name) name = origLine;
 
     // daysUntilExpiry heuristic
     const perishKeywords = /fresco|fresca|frescas|frescos|salm[oó]n|pollo|carne|pescado|leche|yogur|queso|perecible/i;
-    const daysUntilExpiry = perishKeywords.test(line) ? 3 : 7;
+    const daysUntilExpiry = perishKeywords.test(origLine) ? 3 : 7;
 
-    items.push({ name: name || line, quantity, unit, price, daysUntilExpiry });
+    items.push({ name: name, quantity, unit, price, daysUntilExpiry });
+  }
+
+  // helper to escape price tokens for regex
+  function escapeRegExp(str: string) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   return items;
