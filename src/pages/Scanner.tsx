@@ -200,6 +200,7 @@ const Scanner = () => {
     Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }>
   >([]);
   const [rawTexts, setRawTexts] = useState<Array<{ fileName: string; text: string }>>([]);
+  const [useGpt, setUseGpt] = useState(false);
   const [storeName, setStoreName] = useState("Mercadona");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { addProducts } = useInventory();
@@ -223,6 +224,23 @@ const Scanner = () => {
       (async () => {
         setStep('processing');
         try {
+          // Option: send files to a GPT-based extractor (server proxy) if enabled
+          if (useGpt) {
+            try {
+              const res = await sendFilesToGpt(files);
+              if (res?.rawTexts) setRawTexts(res.rawTexts);
+              if (res?.items && res.items.length > 0) {
+                setScannedItems(res.items);
+                setStep('confirm');
+                setOcrProgress(null);
+                return;
+              }
+            } catch (e) {
+              console.error('GPT extractor error', e);
+              // fall through to local OCR
+            }
+          }
+
           let aggregated: Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }> = [];
           const perFileTexts: Array<{ fileName: string; text: string }> = [];
           for (const file of files) {
@@ -259,6 +277,25 @@ const Scanner = () => {
       })();
     }
   };
+
+  // send files to a server endpoint that calls a multimodal LLM (ChatGPT) to extract items
+  async function sendFilesToGpt(files: FileList | File[]) {
+    const fd = new FormData();
+    const arr = Array.from(files as File[]);
+    arr.forEach((f) => fd.append('files', f, f.name));
+
+    // optional: you can set a custom endpoint via env or leave default
+    const endpoint = (import.meta.env && (import.meta.env.VITE_GPT_OCR_ENDPOINT as string)) || '/api/gpt-ocr';
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      body: fd,
+    });
+    if (!resp.ok) throw new Error(`GPT proxy error ${resp.status}`);
+    const json = await resp.json();
+    // expected shape: { items: [...], rawTexts: [{fileName, text}] }
+    return json;
+  }
 
   const handleConfirm = () => {
     const ticketId = crypto.randomUUID();
@@ -349,6 +386,17 @@ const Scanner = () => {
               className="hidden"
               onChange={handleFileUpload}
             />
+
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <input
+                id="useGpt"
+                type="checkbox"
+                checked={useGpt}
+                onChange={(e) => setUseGpt(e.target.checked)}
+                className="h-4 w-4"
+              />
+              <label htmlFor="useGpt">Usar GPT para extracción (requiere proxy configurado)</label>
+            </div>
 
             {/* Demo button */}
             <Button
