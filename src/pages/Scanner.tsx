@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Camera, Upload, Check, Edit2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,11 +9,69 @@ import { Ticket } from "@/types/food";
 import { useToast } from "@/hooks/use-toast";
 
 // OCR helpers (tesseract.js + pdfjs-dist) — free and runs in the browser
-async function extractTextFromImage(file: File): Promise<string> {
+// Basic image preprocessing to improve OCR: scale up, grayscale and increase contrast
+async function preprocessImage(file: File): Promise<Blob> {
+  const img = await createImageBitmap(file);
+  // target width for better OCR — scale up small images
+  const scale = img.width < 1000 ? Math.min(2, Math.ceil(1000 / img.width)) : 1;
+  const w = Math.max(800, img.width * scale);
+  const h = Math.max(800, img.height * scale);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return file;
+  ctx.drawImage(img, 0, 0, w, h);
+
+  // simple grayscale + contrast
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+  // quick contrast boost
+  const contrast = 1.2; // 1 = no change
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    let c = (gray - 128) * contrast + 128;
+    c = Math.max(0, Math.min(255, c));
+    data[i] = data[i + 1] = data[i + 2] = c;
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  return await new Promise<Blob>((res) => canvas.toBlob((b) => res(b || file), "image/png"));
+}
+
+async function extractTextFromImage(file: File, onProgress?: (p: number) => void): Promise<string> {
   try {
     const Tesseract = await import("tesseract.js");
-    const { data } = await Tesseract.recognize(file);
-    return data?.text ?? "";
+    // use worker for better control
+    const { createWorker } = Tesseract as any;
+    const worker = await createWorker({
+      logger: (m: any) => {
+        if (m.status === 'recognizing text' && onProgress) {
+          onProgress(Math.round((m.progress || 0) * 100));
+        }
+      },
+    });
+
+    await worker.load();
+    // load Spanish language for better results on Spanish receipts
+    try {
+      await worker.loadLanguage('spa');
+      await worker.initialize('spa');
+    } catch {
+      // fallback to default language if spa not available
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+    }
+    // set page segmentation mode to single block or auto as experiment
+    await worker.setParameters({ tessedit_pageseg_mode: '6' });
+
+    const pre = await preprocessImage(file);
+    const { data } = await worker.recognize(pre as any);
+    const text = data?.text ?? "";
+    await worker.terminate();
+    return text;
   } catch (e) {
     console.error("Tesseract error", e);
     return "";
@@ -36,8 +94,19 @@ async function extractTextFromPDF(file: File): Promise<string> {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
-      const strings = content.items.map((s: any) => s.str || "");
-      fullText += strings.join(" ") + "\n";
+      // group items by approximate y coordinate to reconstruct visual lines
+      const groups: Record<number, any[]> = {};
+      (content.items || []).forEach((it: any) => {
+        const y = Math.round((it.transform && it.transform[5]) || 0);
+        const x = Math.round((it.transform && it.transform[4]) || 0);
+        if (!groups[y]) groups[y] = [];
+        groups[y].push({ x, str: it.str });
+      });
+      const ys = Object.keys(groups).map((v) => Number(v)).sort((a, b) => b - a);
+      for (const y of ys) {
+        const line = groups[y].sort((a, b) => a.x - b.x).map((c) => c.str).join(' ');
+        fullText += line + "\n";
+      }
     }
     return fullText;
   } catch (e) {
@@ -50,24 +119,51 @@ function parseTextToItems(text: string) {
   // Very simple heuristic parser: split by lines and try to find a price
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const items: Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }> = [];
-  const priceRe = /(\d+[.,]\d{2})/;
+  // price regex supporting thousands and both comma/point decimals
+  const priceRe = /(?:€|EUR)?\s*([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2}))\b/;
+  const ignoreRe = /TOTAL|SUBTOTAL|IVA|TICKET|CAMBIO|EFECTIVO|VUELTO|IMPORTE|A PAGAR/i;
 
   for (const line of lines) {
+    if (ignoreRe.test(line)) continue; // skip totals and non-product lines
+
     const priceMatch = line.match(priceRe);
     if (!priceMatch) continue;
-    const priceRaw = priceMatch[1].replace(',', '.');
+    let priceRaw = priceMatch[1];
+    // normalize thousands separators: if contains '.' and ',', guess which is decimal
+    if (priceRaw.indexOf(',') > -1 && priceRaw.indexOf('.') > -1) {
+      // assume '.' thousands and ',' decimal -> remove dots, replace comma
+      priceRaw = priceRaw.replace(/\./g, '').replace(',', '.');
+    } else {
+      // replace comma with dot
+      priceRaw = priceRaw.replace(',', '.');
+    }
     const price = parseFloat(priceRaw) || 0;
-    // name is part before price
+
+    // name is part before price occurrence
     const before = line.slice(0, line.indexOf(priceMatch[0])).trim();
-    // try to extract quantity (simple number at start)
-    const qtyMatch = before.match(/^(\d+)\s*/);
-    const quantity = qtyMatch ? Number(qtyMatch[1]) : 1;
+    // try to extract quantity and possible unit inside the before segment
+    let quantity = 1;
+    let unit = 'ud';
+    const qtyMatch = before.match(/^(\d+[.,]?\d*)\s*(kg|g|l|ml|uds|unid|unidad|pack)?\s*/i);
     let name = before;
-    if (qtyMatch) name = before.slice(qtyMatch[0].length).trim();
-    // unit heuristic
-    const unit = /kg|g|l|ml|uds|unid|unidad|pack/i.test(line) ? 'uds' : 'ud';
-    // daysUntilExpiry default heuristic: perishables shorter
-    const perishKeywords = /fresco|fresca|frescas|frescos|salm[oó]n|pollo|carne|pescado|leche|yogur|queso/i;
+    if (qtyMatch) {
+      quantity = Number(qtyMatch[1].toString().replace(',', '.')) || 1;
+      if (qtyMatch[2]) unit = qtyMatch[2];
+      name = before.slice(qtyMatch[0].length).trim();
+    }
+
+    // fallback: try to parse patterns like 'name qty price'
+    if (!name) {
+      const parts = line.split(/\s+/);
+      if (parts.length >= 3) {
+        name = parts.slice(0, parts.length - 2).join(' ');
+      } else {
+        name = line;
+      }
+    }
+
+    // daysUntilExpiry heuristic
+    const perishKeywords = /fresco|fresca|frescas|frescos|salm[oó]n|pollo|carne|pescado|leche|yogur|queso|perecible/i;
     const daysUntilExpiry = perishKeywords.test(line) ? 3 : 7;
 
     items.push({ name: name || line, quantity, unit, price, daysUntilExpiry });
@@ -103,6 +199,7 @@ const Scanner = () => {
   const { addProducts } = useInventory();
   const { addTicket } = useTickets();
   const { toast } = useToast();
+  const [ocrProgress, setOcrProgress] = useState<number | null>(null);
 
   const handleCapture = () => {
     setStep("processing");
@@ -126,7 +223,7 @@ const Scanner = () => {
             if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
               text = await extractTextFromPDF(file);
             } else if (file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|bmp)$/i.test(file.name)) {
-              text = await extractTextFromImage(file);
+              text = await extractTextFromImage(file, (p) => setOcrProgress(p));
             } else {
               // unknown type — skip
               continue;
@@ -134,6 +231,9 @@ const Scanner = () => {
             const items = parseTextToItems(text);
             aggregated = aggregated.concat(items);
           }
+
+          // reset progress
+          setOcrProgress(null);
 
           if (aggregated.length > 0) {
             setScannedItems(aggregated);
@@ -257,6 +357,9 @@ const Scanner = () => {
             <div className="h-16 w-16 rounded-full border-4 border-primary/30 border-t-primary animate-spin" />
             <p className="text-muted-foreground font-medium">Analizando ticket con IA...</p>
             <p className="text-xs text-muted-foreground">Extrayendo productos y fechas</p>
+            {ocrProgress !== null && (
+              <p className="text-xs text-muted-foreground">Progreso OCR: {ocrProgress}%</p>
+            )}
           </div>
         )}
 
