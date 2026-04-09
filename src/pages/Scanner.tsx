@@ -8,6 +8,74 @@ import { useTickets } from "@/hooks/useTickets";
 import { Ticket } from "@/types/food";
 import { useToast } from "@/hooks/use-toast";
 
+// OCR helpers (tesseract.js + pdfjs-dist) — free and runs in the browser
+async function extractTextFromImage(file: File): Promise<string> {
+  try {
+    const Tesseract = await import("tesseract.js");
+    const { data } = await Tesseract.recognize(file);
+    return data?.text ?? "";
+  } catch (e) {
+    console.error("Tesseract error", e);
+    return "";
+  }
+}
+
+async function extractTextFromPDF(file: File): Promise<string> {
+  try {
+  // dynamic import of pdfjs-dist
+  const pdfjsLib = await import("pdfjs-dist");
+    // try to set worker src from CDN (fallback)
+    try {
+      // @ts-ignore
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version || "3.8.162"}/pdf.worker.min.js`;
+    } catch {}
+
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const strings = content.items.map((s: any) => s.str || "");
+      fullText += strings.join(" ") + "\n";
+    }
+    return fullText;
+  } catch (e) {
+    console.error("PDFJS error", e);
+    return "";
+  }
+}
+
+function parseTextToItems(text: string) {
+  // Very simple heuristic parser: split by lines and try to find a price
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const items: Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }> = [];
+  const priceRe = /(\d+[.,]\d{2})/;
+
+  for (const line of lines) {
+    const priceMatch = line.match(priceRe);
+    if (!priceMatch) continue;
+    const priceRaw = priceMatch[1].replace(',', '.');
+    const price = parseFloat(priceRaw) || 0;
+    // name is part before price
+    const before = line.slice(0, line.indexOf(priceMatch[0])).trim();
+    // try to extract quantity (simple number at start)
+    const qtyMatch = before.match(/^(\d+)\s*/);
+    const quantity = qtyMatch ? Number(qtyMatch[1]) : 1;
+    let name = before;
+    if (qtyMatch) name = before.slice(qtyMatch[0].length).trim();
+    // unit heuristic
+    const unit = /kg|g|l|ml|uds|unid|unidad|pack/i.test(line) ? 'uds' : 'ud';
+    // daysUntilExpiry default heuristic: perishables shorter
+    const perishKeywords = /fresco|fresca|frescas|frescos|salm[oó]n|pollo|carne|pescado|leche|yogur|queso/i;
+    const daysUntilExpiry = perishKeywords.test(line) ? 3 : 7;
+
+    items.push({ name: name || line, quantity, unit, price, daysUntilExpiry });
+  }
+
+  return items;
+}
+
 // Simulated OCR result for demo
 function simulateOCR(): Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }> {
   const products = [
@@ -47,7 +115,38 @@ const Scanner = () => {
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      handleCapture();
+      const files = Array.from(e.target.files);
+      // process files: images via Tesseract, PDFs via pdfjs
+      (async () => {
+        setStep('processing');
+        try {
+          let aggregated: Array<{ name: string; quantity: number; unit: string; price: number; daysUntilExpiry: number }> = [];
+          for (const file of files) {
+            let text = "";
+            if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+              text = await extractTextFromPDF(file);
+            } else if (file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|bmp)$/i.test(file.name)) {
+              text = await extractTextFromImage(file);
+            } else {
+              // unknown type — skip
+              continue;
+            }
+            const items = parseTextToItems(text);
+            aggregated = aggregated.concat(items);
+          }
+
+          if (aggregated.length > 0) {
+            setScannedItems(aggregated);
+            setStep('confirm');
+          } else {
+            // fallback to demo capture
+            handleCapture();
+          }
+        } catch (err) {
+          console.error(err);
+          handleCapture();
+        }
+      })();
     }
   };
 
